@@ -31,6 +31,7 @@ I understand these commands:
 `components` - list monitored Jira components
 `ping` - check whether the bot is running properly
 `refresh-all` - refresh all unresolved issue descriptions
+`resolve-all` - attempt to resolve all tracked issues
 `help` - print this message
 Report problems <{ISSUE_LINK}|here>.
 '''
@@ -658,6 +659,59 @@ def process_event(config, socket_client, req):
                 client.chat_postMessage(channel=payload.event.channel, text=HELP,
                         # start a new thread or continue the existing one
                         thread_ts=payload.event.get('thread_ts', payload.event.ts))
+            elif message == 'resolve-all':
+                # Add hourglass reaction to show we're working
+                client.reactions_add(channel=payload.event.channel,
+                        timestamp=payload.event.ts,
+                        name='hourglass_flowing_sand')
+                try:
+                    resolved_count = 0
+                    resolved_reasons = []
+                    skipped_count = 0
+                    skipped_reasons = []
+                    
+                    for issue in Issue.list_unresolved(config, client, japi, db):
+                        if not issue.interesting_component:
+                            status = f'Issue now in *{escape(issue.project.key)}*/*{escape(issue.components_desc)}*.'
+                            resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
+                        elif issue.status.name == 'Closed':
+                            status = f'Issue now *Closed/{escape(issue.resolution.name)}*.'
+                            resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
+                        elif issue.status.name == 'New':
+                            status = f'Issue still in component *{escape(issue.project.key)}*/*{escape(issue.components_desc)}* and status *New*, cannot resolve.'
+                            skipped_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
+                            skipped_count += 1
+                            continue
+                        elif issue.interesting_assignee:
+                            status = f'Issue still assigned to *{escape(issue.assignee_name)}*, cannot resolve.'
+                            skipped_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
+                            skipped_count += 1
+                            continue
+                        else:
+                            status = f'Issue now *{escape(issue.status.name)}*, assigned to *{escape(issue.assignee_name)}*.'
+                            resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
+                        
+                        issue.resolve()
+                        issue.log(f'_Resolved by <@{payload.event.user}>. {status} Unresolve with_ `<@{config.slack_id}> unresolve`')
+                        resolved_count += 1
+
+                    # Report results
+                    result_msg = ""
+                    if resolved_count > 0:
+                        result_msg += f"Resolved {resolved_count} issues:\n" + "\n".join(resolved_reasons)
+                    else:
+                        result_msg += "No issues resolved!\n"
+                    if skipped_count > 0:
+                        result_msg += f"\nSkipped {skipped_count} issues that couldn't be resolved:\n" + "\n".join(skipped_reasons)
+                    
+                    client.chat_postMessage(channel=payload.event.channel,
+                            text=result_msg,
+                            thread_ts=payload.event.ts)
+                finally:
+                    client.reactions_remove(channel=payload.event.channel,
+                            timestamp=payload.event.ts,
+                            name='hourglass_flowing_sand')
+                complete_command()
             elif message == 'throw':
                 # undocumented
                 complete_command()
