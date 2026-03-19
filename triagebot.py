@@ -53,7 +53,7 @@ def format_date(date):
 
 def connect_jira(config):
     return JIRA(
-        config.jira, token_auth=config.jira_token,
+        config.jira, basic_auth=(config.jira_email, config.jira_token),
         default_batch_sizes={
             JIRAIssue: 50,
         }
@@ -290,7 +290,7 @@ class Issue:
         return (
             self.assignee is None or
             any(
-                self._config.components.get((self.project.key, c)) == self.assignee.name
+                self._config.components.get((self.project.key, c)) == self.assignee.accountId
                 for c in self.components
             )
         )
@@ -925,6 +925,7 @@ def main():
             for i in config.jira_components
         }
     env_map = (
+        ('TRIAGEBOT_JIRA_EMAIL', 'jira-email'),
         ('TRIAGEBOT_JIRA_TOKEN', 'jira-token'),
         ('TRIAGEBOT_SLACK_APP_TOKEN', 'slack-app-token'),
         ('TRIAGEBOT_SLACK_TOKEN', 'slack-token'),
@@ -940,7 +941,7 @@ def main():
     config.slack_id = client.auth_test()['user_id']
     japi = connect_jira(config)
     try:
-        config.jira_id = japi.myself()['name']
+        config.jira_id = japi.myself()['accountId']
     except JIRAError:
         raise Exception('Did not authenticate')
     # look up custom fields
