@@ -257,13 +257,33 @@ class Issue:
 
     @classmethod
     def list_unresolved(cls, config, client, japi, db):
+        issues = []
+        skipped_ids = []
         for id in db.list_unresolved():
-            yield cls(config, client, japi, db, id=id)
+            try:
+                issues.append(cls(config, client, japi, db, id=id))
+            except JIRAError as e:
+                if e.status_code == 404:
+                    print(f'Warning: issue {id} not found in Jira, skipping')
+                    skipped_ids.append(id)
+                else:
+                    raise
+        return issues, skipped_ids
 
     @classmethod
     def list_autoclose(cls, config, client, japi, db):
+        issues = []
+        skipped_ids = []
         for id in db.list_autoclose():
-            yield cls(config, client, japi, db, id=id)
+            try:
+                issues.append(cls(config, client, japi, db, id=id))
+            except JIRAError as e:
+                if e.status_code == 404:
+                    print(f'Warning: issue {id} not found in Jira, skipping')
+                    skipped_ids.append(id)
+                else:
+                    raise
+        return issues, skipped_ids
 
     @property
     def posted(self):
@@ -461,8 +481,8 @@ def post_report(config, client, japi, db):
     and timestamp.'''
     parts = []
     last_project = None
-    for issue in sorted(Issue.list_unresolved(config, client, japi, db),
-            key=lambda i: i.project.key):
+    issues, skipped_ids = Issue.list_unresolved(config, client, japi, db)
+    for issue in sorted(issues, key=lambda i: i.project.key):
         if last_project != issue.project.key:
             if last_project is not None:
                 parts.append('')
@@ -476,6 +496,9 @@ def post_report(config, client, japi, db):
         parts.append(part)
     if not parts:
         parts.append('*No unresolved issues!*')
+    if skipped_ids:
+        parts.append('')
+        parts.append(f':warning: Could not fetch {len(skipped_ids)} issues from Jira (IDs: {", ".join(str(id) for id in skipped_ids)})')
     message = '\n'.join(parts)
     ts = client.chat_postMessage(channel=config.channel,
             text=message, unfurl_links=False, unfurl_media=False)['ts']
@@ -590,8 +613,13 @@ def process_event(config, socket_client, req):
                         timestamp=payload.event.ts,
                         name='hourglass_flowing_sand')
                 try:
-                    for issue in Issue.list_unresolved(config, client, japi, db):
+                    issues, skipped_ids = Issue.list_unresolved(config, client, japi, db)
+                    for issue in issues:
                         issue.update_message()
+                    if skipped_ids:
+                        client.chat_postMessage(channel=payload.event.channel,
+                                text=f':warning: Could not fetch {len(skipped_ids)} issues from Jira (IDs: {", ".join(str(id) for id in skipped_ids)})',
+                                thread_ts=payload.event.ts)
                 finally:
                     client.reactions_remove(channel=payload.event.channel,
                             timestamp=payload.event.ts,
@@ -670,7 +698,8 @@ def process_event(config, socket_client, req):
                     skipped_count = 0
                     skipped_reasons = []
                     
-                    for issue in Issue.list_unresolved(config, client, japi, db):
+                    issues, skipped_ids = Issue.list_unresolved(config, client, japi, db)
+                    for issue in issues:
                         if not issue.interesting_component:
                             status = f'Issue now in *{escape(issue.project.key)}*/*{escape(issue.components_desc)}*.'
                             resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
@@ -703,7 +732,9 @@ def process_event(config, socket_client, req):
                         result_msg += "No issues resolved!\n"
                     if skipped_count > 0:
                         result_msg += f"\nSkipped {skipped_count} issues that couldn't be resolved:\n" + "\n".join(skipped_reasons)
-                    
+                    if skipped_ids:
+                        result_msg += f"\n:warning: Could not fetch {len(skipped_ids)} issues from Jira (IDs: {', '.join(str(id) for id in skipped_ids)})"
+
                     client.chat_postMessage(channel=payload.event.channel,
                             text=result_msg,
                             thread_ts=payload.event.ts)
@@ -839,8 +870,14 @@ class Scheduler:
         for id in sorted([int(v.id) for v in results]):
             with self._db:
                 if not Issue.is_unresolved(self._db, id):
-                    issue = Issue(self._config, self._client, self._japi,
-                            self._db, id=id)
+                    try:
+                        issue = Issue(self._config, self._client, self._japi,
+                                self._db, id=id)
+                    except JIRAError as e:
+                        if e.status_code == 404:
+                            print(f'Warning: issue {id} returned by search but not found by ID, skipping')
+                            continue
+                        raise
                     if not issue.posted:
                         # Unknown issue; post it
                         issue.post()
@@ -853,8 +890,9 @@ class Scheduler:
                                 thread_ts=issue.ts)
 
         with self._db:
-            for issue in Issue.list_autoclose(self._config, self._client,
-                    self._japi, self._db):
+            issues, skipped_ids = Issue.list_autoclose(self._config,
+                    self._client, self._japi, self._db)
+            for issue in issues:
                 issue.refresh_autoclose()
 
         with self._db:
