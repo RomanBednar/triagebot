@@ -975,7 +975,7 @@ class Scheduler:
                 desc = desc[:77] + '...'
 
             # Build per-CVE Jira JQL link
-            jql = (f'summary ~ "{cve_id}" AND '
+            jql = (f'summary ~ "{cve_id}" AND statusCategory != Done AND '
                     f'({" OR ".join(component_terms)})')
             jira_link = f'{self._config.jira}/issues/?jql={quote(jql)}'
 
