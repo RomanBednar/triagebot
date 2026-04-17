@@ -348,8 +348,9 @@ class Issue:
                 status = f'Will close after *{format_date(self.autoclose_time)}*'
             elif not self.interesting_component:
                 status = f'Moved to *{escape(self.project.key)}*/*{escape(self.components_desc)}*'
-            elif self.status.name == 'Closed':
-                status = f'Closed as *{escape(self.resolution.name)}*'
+            elif self.status.statusCategory.key == 'done':
+                res_name = self.resolution.name if self.resolution else 'Resolved'
+                status = f'*{escape(self.status.name)}* as *{escape(res_name)}*'
             else:
                 status = f'Assigned to *{escape(self.assignee_name)}*'
             blocks.append({
@@ -404,7 +405,7 @@ class Issue:
     def check_can_autoclose(self):
         '''Check the issue against the autoclose rules, and return None if okay
         to autoclose or else a reason string.'''
-        if self.status.name != 'New':
+        if self.status.statusCategory.key != 'new':
             return f'status is *{self.status.name}*'
         elif not self.interesting_component:
             return f'component is *{escape(self.project.key)}*/*{escape(self.components_desc)}*'
@@ -722,11 +723,12 @@ def process_event(config, socket_client, req):
                         if not issue.interesting_component:
                             status = f'Issue now in *{escape(issue.project.key)}*/*{escape(issue.components_desc)}*.'
                             resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
-                        elif issue.status.name == 'Closed':
-                            status = f'Issue now *Closed/{escape(issue.resolution.name)}*.'
+                        elif issue.status.statusCategory.key == 'done':
+                            res_name = issue.resolution.name if issue.resolution else 'Resolved'
+                            status = f'Issue now *{escape(issue.status.name)}/{escape(res_name)}*.'
                             resolved_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
-                        elif issue.status.name == 'New':
-                            status = f'Issue still in component *{escape(issue.project.key)}*/*{escape(issue.components_desc)}* and status *New*, cannot resolve.'
+                        elif issue.status.statusCategory.key == 'new':
+                            status = f'Issue still in component *{escape(issue.project.key)}*/*{escape(issue.components_desc)}* and status *{escape(issue.status.name)}*, cannot resolve.'
                             skipped_reasons.append(f"• <{issue.url}|[{issue.key}]> {status}")
                             skipped_count += 1
                             continue
@@ -792,11 +794,12 @@ def process_event(config, socket_client, req):
             if payload.actions[0].value == 'resolve':
                 if not issue.interesting_component:
                     status = f'Issue now in *{escape(issue.project.key)}*/*{escape(issue.components_desc)}*.'
-                elif issue.status.name == 'Closed':
-                    status = f'Issue now *Closed/{escape(issue.resolution.name)}*.'
-                elif issue.status.name == 'New':
+                elif issue.status.statusCategory.key == 'done':
+                    res_name = issue.resolution.name if issue.resolution else 'Resolved'
+                    status = f'Issue now *{escape(issue.status.name)}/{escape(res_name)}*.'
+                elif issue.status.statusCategory.key == 'new':
                     client.chat_postMessage(channel=payload.container.channel_id,
-                            text=f"<@{payload.user.id}> Issue still in component *{escape(issue.project.key)}*/*{escape(issue.components_desc)}* and status *New*, cannot resolve.",
+                            text=f"<@{payload.user.id}> Issue still in component *{escape(issue.project.key)}*/*{escape(issue.components_desc)}* and status *{escape(issue.status.name)}*, cannot resolve.",
                             thread_ts=payload.container.message_ts)
                     return
                 elif issue.interesting_assignee:
@@ -880,9 +883,9 @@ class Scheduler:
             component_assignee_terms.append(f'{base_term} AND ({assignee_term})')
         query = (
             # New issues
-            f'status = New AND ({" OR ".join(component_terms)}) OR ' +
+            f'statusCategory = "To Do" AND ({" OR ".join(component_terms)}) OR ' +
             # Open issues with default or unspecified assignee
-            f'status != Closed AND ({" OR ".join(component_assignee_terms)})'
+            f'statusCategory != Done AND ({" OR ".join(component_assignee_terms)})'
         )
         results = self._japi.search_issues(query, fields=['summary'],
                 maxResults=False)
