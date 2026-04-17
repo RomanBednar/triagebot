@@ -12,6 +12,8 @@ from itertools import count
 from jira import JIRA, JIRAError
 from jira.resources import Issue as JIRAIssue
 import os
+import re
+from urllib.parse import quote
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode import SocketModeClient
@@ -172,6 +174,9 @@ class Database:
         if res is None:
             raise KeyError
         return res[0]
+
+    def delete_special(self, name):
+        self._db.execute('delete from specials where name == ?', (name,))
 
     def add_event(self, channel, ts):
         '''Return False if the event is already present.'''
@@ -482,7 +487,10 @@ def post_report(config, client, japi, db):
     parts = []
     last_project = None
     issues, skipped_ids = Issue.list_unresolved(config, client, japi, db)
+    cve_pattern = re.compile(r'CVE-\d{4}-\d{4,}')
     for issue in sorted(issues, key=lambda i: i.project.key):
+        if cve_pattern.search(issue.summary):
+            continue  # shown in CVE aggregate message, not individually
         if last_project != issue.project.key:
             if last_project is not None:
                 parts.append('')
@@ -499,6 +507,17 @@ def post_report(config, client, japi, db):
     if skipped_ids:
         parts.append('')
         parts.append(f':warning: Could not fetch {len(skipped_ids)} issues from Jira (IDs: {", ".join(str(id) for id in skipped_ids)})')
+    # Inline the CVE aggregate message text if one exists
+    try:
+        cve_channel, cve_ts = db.lookup_special('cve_aggregate')
+    except KeyError:
+        pass
+    else:
+        resp = client.conversations_history(channel=cve_channel,
+                oldest=cve_ts, latest=cve_ts, inclusive=True, limit=1)
+        if resp['messages']:
+            parts.append('')
+            parts.append(resp['messages'][0]['text'])
     message = '\n'.join(parts)
     ts = client.chat_postMessage(channel=config.channel,
             text=message, unfurl_links=False, unfurl_media=False)['ts']
@@ -865,9 +884,23 @@ class Scheduler:
             # Open issues with default or unspecified assignee
             f'status != Closed AND ({" OR ".join(component_assignee_terms)})'
         )
-        results = self._japi.search_issues(query, fields=[], maxResults=False)
+        results = self._japi.search_issues(query, fields=['summary'],
+                maxResults=False)
 
-        for id in sorted([int(v.id) for v in results]):
+        cve_pattern = re.compile(r'(CVE-\d{4}-\d{4,})')
+        cve_issues = {}  # {cve_id: [(key, summary), ...]}
+        non_cve_ids = []
+        for result in results:
+            summary = result.fields.summary or ''
+            match = cve_pattern.search(summary)
+            if match:
+                cve_id = match.group(1)
+                cve_issues.setdefault(cve_id, []).append(
+                        (result.key, summary))
+            else:
+                non_cve_ids.append(int(result.id))
+
+        for id in sorted(non_cve_ids):
             with self._db:
                 if not Issue.is_unresolved(self._db, id):
                     try:
@@ -896,8 +929,90 @@ class Scheduler:
                 issue.refresh_autoclose()
 
         with self._db:
+            self._update_cve_aggregate(cve_issues, component_terms)
+
+        with self._db:
             self._db.prune_events()
             self._update_watchdog()
+
+    def _update_cve_aggregate(self, cve_issues, component_terms):
+        '''Post, update, or remove the CVE aggregate message.'''
+        if not cve_issues:
+            # No CVEs — remove existing aggregate message if any
+            try:
+                channel, ts = self._db.lookup_special('cve_aggregate')
+                try:
+                    self._client.chat_delete(channel=channel, ts=ts)
+                except SlackApiError as e:
+                    if e.response['error'] != 'message_not_found':
+                        raise
+                self._db.delete_special('cve_aggregate')
+            except KeyError:
+                pass  # No existing aggregate — nothing to do
+            return
+
+        # Build the aggregate message
+        total = sum(len(issues) for issues in cve_issues.values())
+        cve_count = len(cve_issues)
+
+        header = (f':shield: *{total} unresolved CVE '
+                f'bug{"s" if total != 1 else ""}* '
+                f'({cve_count} CVE{"s" if cve_count != 1 else ""})')
+
+        lines = [header, '']
+        char_count = len(header)
+        truncated = 0
+
+        for cve_id in sorted(cve_issues.keys()):
+            issues = cve_issues[cve_id]
+            # Extract description from first issue's summary (after CVE ID)
+            _, first_summary = issues[0]
+            desc = re.sub(r'CVE-\d{4}-\d{4,}', '', first_summary).strip(' :')
+            if len(desc) > 80:
+                desc = desc[:77] + '...'
+
+            # Build per-CVE Jira JQL link
+            jql = (f'summary ~ "{cve_id}" AND '
+                    f'({" OR ".join(component_terms)})')
+            jira_link = f'{self._config.jira}/issues/?jql={quote(jql)}'
+
+            line = (f'\u2022 <{jira_link}|{cve_id}> '
+                    f'({len(issues)} bug{"s" if len(issues) != 1 else ""}) '
+                    f'\u2014 {escape(desc)}')
+
+            if char_count + len(line) + 1 > 3500:
+                truncated += 1
+                continue
+            lines.append(line)
+            char_count += len(line) + 1
+
+        if truncated:
+            lines.append(f'_...and {truncated} more '
+                    f'CVE{"s" if truncated != 1 else ""}_')
+
+        message = '\n'.join(lines)
+
+        # Post or update
+        try:
+            channel, ts = self._db.lookup_special('cve_aggregate')
+            # Update existing message
+            try:
+                self._client.chat_update(channel=channel, ts=ts,
+                        text=message, unfurl_links=False,
+                        unfurl_media=False)
+            except SlackApiError as e:
+                if e.response['error'] == 'message_not_found':
+                    # Self-heal: message was deleted externally, re-post
+                    print(f'CVE aggregate message was deleted externally, re-posting')
+                    self._db.delete_special('cve_aggregate')
+                    raise KeyError
+                raise
+        except KeyError:
+            # Post new aggregate message
+            ts = self._client.chat_postMessage(
+                    channel=self._config.channel, text=message,
+                    unfurl_links=False, unfurl_media=False)['ts']
+            self._db.set_special('cve_aggregate', self._config.channel, ts)
 
     def _update_watchdog(self):
         '''Reschedule the message-in-a-bottle that warns of a bot failure.'''
