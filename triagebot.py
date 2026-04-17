@@ -887,16 +887,22 @@ class Scheduler:
             # Open issues with default or unspecified assignee
             f'statusCategory != Done AND ({" OR ".join(component_assignee_terms)})'
         )
-        results = self._japi.search_issues(query, fields=['summary'],
-                maxResults=False)
+        results = self._japi.search_issues(query,
+                fields=['summary', 'assignee'], maxResults=False)
 
         cve_pattern = re.compile(r'(CVE-\d{4}-\d{4,})')
+        default_assignees = {v for v in self._config.components.values()
+                if v is not None}
         cve_issues = {}  # {cve_id: [(key, summary), ...]}
         non_cve_ids = []
         for result in results:
             summary = result.fields.summary or ''
             match = cve_pattern.search(summary)
             if match:
+                assignee = result.fields.assignee
+                if (assignee is not None
+                        and assignee.accountId not in default_assignees):
+                    continue
                 cve_id = match.group(1)
                 cve_issues.setdefault(cve_id, []).append(
                         (result.key, summary))
@@ -932,13 +938,15 @@ class Scheduler:
                 issue.refresh_autoclose()
 
         with self._db:
-            self._update_cve_aggregate(cve_issues, component_terms)
+            self._update_cve_aggregate(cve_issues, component_terms,
+                    component_assignee_terms)
 
         with self._db:
             self._db.prune_events()
             self._update_watchdog()
 
-    def _update_cve_aggregate(self, cve_issues, component_terms):
+    def _update_cve_aggregate(self, cve_issues, component_terms,
+            component_assignee_terms):
         '''Post, update, or remove the CVE aggregate message.'''
         if not cve_issues:
             # No CVEs — remove existing aggregate message if any
@@ -976,7 +984,7 @@ class Scheduler:
 
             # Build per-CVE Jira JQL link
             jql = (f'summary ~ "{cve_id}" AND statusCategory != Done AND '
-                    f'({" OR ".join(component_terms)})')
+                    f'({" OR ".join(component_assignee_terms)})')
             jira_link = f'{self._config.jira}/issues/?jql={quote(jql)}'
 
             line = (f'\u2022 <{jira_link}|{cve_id}> '
