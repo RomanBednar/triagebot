@@ -1113,6 +1113,19 @@ def main():
     config.needinfo_field = field_map['Need Info From']
     db = Database(config)
 
+    # Delete stale CVE aggregate message from previous instance so the
+    # first poll posts a fresh one with up-to-date JQL links.
+    try:
+        channel, ts = db.lookup_special('cve_aggregate')
+        try:
+            client.chat_delete(channel=channel, ts=ts)
+        except SlackApiError:
+            pass
+        with db:
+            db.delete_special('cve_aggregate')
+    except KeyError:
+        pass
+
     # Start socket-mode listener in the background
     socket_client = SocketModeClient(app_token=config.slack_app_token,
             web_client=WebClient(token=config.slack_token))
