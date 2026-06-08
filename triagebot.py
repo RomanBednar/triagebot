@@ -690,7 +690,7 @@ def process_event(config, socket_client, req):
             elif message == 'ping':
                 # Check Jira connectivity
                 try:
-                    japi.my_permissions()
+                    japi.myself()
                 except Exception:
                     # Swallow exception details and just report the failure
                     fail_command('Cannot contact Jira.')
