@@ -1,5 +1,6 @@
+certifi>=2026.10.19
 croniter
-dotted-dict
+dotted-dict<2
 jira
 PyYAML
 slack_sdk
